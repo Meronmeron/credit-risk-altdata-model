@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  credit-risk-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PATH=/app/models/credit_risk_model.joblib
+      - LOG_LEVEL=info
+    volumes:
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Redis for caching (uncomment if needed)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   restart: unless-stopped
+
+  # Optional: PostgreSQL for data storage (uncomment if needed)
+  # postgres:
+  #   image: postgres:15-alpine
+  #   environment:
+  #     POSTGRES_DB: creditrisk
+  #     POSTGRES_USER: credituser
+  #     POSTGRES_PASSWORD: creditpass
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+# volumes:
+#   postgres_data:
