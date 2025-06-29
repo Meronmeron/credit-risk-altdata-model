@@ -29,6 +29,7 @@ from sklearn.preprocessing import (
 )
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.compose import ColumnTransformer
+from sklearn.cluster import KMeans
 
 # WoE and IV libraries
 try:
@@ -292,6 +293,178 @@ class WoETransformer(BaseEstimator, TransformerMixin):
         return woe_dict, iv
 
 
+class KMeansRiskProxyTransformer(BaseEstimator, TransformerMixin):
+    """
+    Creates risk proxy variable using K-Means clustering on RFM features (Task 4)
+    """
+    
+    def __init__(self, rfm_cols=['Recency', 'Frequency', 'Total_Amount'], 
+                 n_clusters=3, random_state=42):
+        self.rfm_cols = rfm_cols
+        self.n_clusters = n_clusters
+        self.random_state = random_state
+        self.kmeans = None
+        self.scaler = None
+        self.high_risk_cluster = None
+        self.cluster_profiles = None
+        self._use_composite_score = False
+        self._risk_threshold = None
+        self._rfm_features_fit = None
+        
+    def fit(self, X, y=None):
+        """Fit K-Means clustering on RFM features"""
+        # Extract RFM features
+        rfm_features = X[self.rfm_cols].copy()
+        
+        # Handle extreme outliers by capping values
+        for col in self.rfm_cols:
+            Q1 = rfm_features[col].quantile(0.25)
+            Q3 = rfm_features[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            rfm_features[col] = rfm_features[col].clip(lower_bound, upper_bound)
+        
+        # Scale features before clustering
+        self.scaler = StandardScaler()
+        rfm_scaled = self.scaler.fit_transform(rfm_features)
+        
+        # Fit K-Means clustering
+        self.kmeans = KMeans(n_clusters=self.n_clusters, random_state=self.random_state, n_init=10)
+        cluster_labels = self.kmeans.fit_predict(rfm_scaled)
+        
+        # Analyze clusters to identify high-risk segment
+        cluster_analysis = rfm_features.copy()
+        cluster_analysis['Cluster'] = cluster_labels
+        
+        # Calculate cluster profiles
+        self.cluster_profiles = cluster_analysis.groupby('Cluster').agg({
+            'Recency': 'mean',
+            'Frequency': 'mean', 
+            'Total_Amount': 'mean'
+        })
+        
+        # Improved risk scoring logic
+        # High-risk: High recency (inactive) + Low frequency + Low monetary
+        risk_scores = []
+        
+        # Normalize each metric to 0-1 scale for fair comparison
+        recency_min, recency_max = self.cluster_profiles['Recency'].min(), self.cluster_profiles['Recency'].max()
+        frequency_min, frequency_max = self.cluster_profiles['Frequency'].min(), self.cluster_profiles['Frequency'].max()
+        monetary_min, monetary_max = self.cluster_profiles['Total_Amount'].min(), self.cluster_profiles['Total_Amount'].max()
+        
+        for cluster in range(self.n_clusters):
+            profile = self.cluster_profiles.loc[cluster]
+            
+            # Normalize scores (0-1 scale)
+            if recency_max > recency_min:
+                recency_norm = (profile['Recency'] - recency_min) / (recency_max - recency_min)
+            else:
+                recency_norm = 0
+                
+            if frequency_max > frequency_min:
+                frequency_norm = (profile['Frequency'] - frequency_min) / (frequency_max - frequency_min)
+            else:
+                frequency_norm = 0
+                
+            if monetary_max > monetary_min:
+                monetary_norm = (profile['Total_Amount'] - monetary_min) / (monetary_max - monetary_min)
+            else:
+                monetary_norm = 0
+            
+            # Risk score: Higher recency = worse, Lower frequency = worse, Lower monetary = worse
+            risk_score = (recency_norm * 0.4) + ((1 - frequency_norm) * 0.3) + ((1 - monetary_norm) * 0.3)
+            risk_scores.append(risk_score)
+        
+        # Cluster with highest risk score is the high-risk cluster
+        self.high_risk_cluster = np.argmax(risk_scores)
+        
+        # If risk distribution is too extreme (>95% or <5%), use median split approach
+        temp_labels = (cluster_labels == self.high_risk_cluster).astype(int)
+        risk_pct = temp_labels.mean()
+        
+        if risk_pct < 0.05 or risk_pct > 0.95:
+            # Use RFM composite score approach as fallback
+            rfm_composite = (
+                (rfm_features['Recency'] / rfm_features['Recency'].max()) * 0.4 +
+                (1 - rfm_features['Frequency'] / rfm_features['Frequency'].max()) * 0.3 +
+                (1 - rfm_features['Total_Amount'] / rfm_features['Total_Amount'].max()) * 0.3
+            )
+            # Use top 30% as high risk
+            risk_threshold = rfm_composite.quantile(0.7)
+            self._use_composite_score = True
+            self._risk_threshold = risk_threshold
+            self._rfm_features_fit = rfm_features
+            
+            logger.info(f"Using composite RFM score approach (cluster distribution too extreme)")
+        else:
+            self._use_composite_score = False
+        
+        logger.info(f"K-Means clustering completed with {self.n_clusters} clusters")
+        logger.info(f"High-risk cluster identified: Cluster {self.high_risk_cluster}")
+        logger.info(f"Risk scores: {risk_scores}")
+        logger.info(f"Cluster profiles:\n{self.cluster_profiles}")
+        
+        return self
+    
+    def transform(self, X):
+        """Apply clustering and create is_high_risk target variable"""
+        X_copy = X.copy()
+        
+        # Extract RFM features
+        rfm_features = X_copy[self.rfm_cols].copy()
+        
+        # Apply same outlier handling as in fit
+        for col in self.rfm_cols:
+            if col in rfm_features.columns:
+                Q1 = rfm_features[col].quantile(0.25)
+                Q3 = rfm_features[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                rfm_features[col] = rfm_features[col].clip(lower_bound, upper_bound)
+        
+        if hasattr(self, '_use_composite_score') and self._use_composite_score:
+            # Use composite RFM score approach
+            rfm_composite = (
+                (rfm_features['Recency'] / rfm_features['Recency'].max()) * 0.4 +
+                (1 - rfm_features['Frequency'] / rfm_features['Frequency'].max()) * 0.3 +
+                (1 - rfm_features['Total_Amount'] / rfm_features['Total_Amount'].max()) * 0.3
+            )
+            X_copy['is_high_risk'] = (rfm_composite >= self._risk_threshold).astype(int)
+            X_copy['Cluster'] = -1  # Indicate composite scoring was used
+            
+            logger.info(f"Using composite RFM scoring approach")
+        else:
+            # Use K-Means clustering approach
+            rfm_scaled = self.scaler.transform(rfm_features)
+            cluster_labels = self.kmeans.predict(rfm_scaled)
+            X_copy['Cluster'] = cluster_labels
+            X_copy['is_high_risk'] = (cluster_labels == self.high_risk_cluster).astype(int)
+        
+        risk_count = X_copy['is_high_risk'].sum()
+        risk_pct = risk_count / len(X_copy) * 100
+        
+        logger.info(f"Risk proxy created using K-Means clustering")
+        logger.info(f"High-risk customers: {risk_count} / {len(X_copy)} ({risk_pct:.1f}%)")
+        
+        return X_copy
+    
+    def get_cluster_analysis(self) -> pd.DataFrame:
+        """Get detailed cluster analysis"""
+        if self.cluster_profiles is None:
+            return pd.DataFrame()
+        
+        analysis = self.cluster_profiles.copy()
+        analysis['Is_High_Risk'] = 0
+        analysis.loc[self.high_risk_cluster, 'Is_High_Risk'] = 1
+        analysis['Risk_Level'] = ['Low', 'Medium', 'High'][::1] if self.n_clusters == 3 else [f'Cluster_{i}' for i in range(self.n_clusters)]
+        
+        # Add cluster size information if available
+        return analysis
+
+
 class ComprehensiveFeatureEngineering:
     """
     Comprehensive feature engineering pipeline using sklearn Pipeline
@@ -452,6 +625,47 @@ class ComprehensiveFeatureEngineering:
         iv_df = pd.DataFrame(iv_scores).sort_values('Information_Value', ascending=False)
         return iv_df
 
+    def fit_transform_customers_task4(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply Task 4 specific feature engineering with K-Means clustering risk proxy"""
+        
+        logger.info("Applying Task 4: K-Means clustering for risk proxy creation...")
+        
+        # Step 1: Create aggregate features (RFM)
+        agg_transformer = AggregateFeatureTransformer(
+            self.customer_col, self.date_col, self.amount_col, self.value_col
+        )
+        customer_features = agg_transformer.fit_transform(df)
+        
+        # Step 2: Apply K-Means clustering for risk proxy (Task 4)
+        kmeans_risk_transformer = KMeansRiskProxyTransformer(
+            rfm_cols=['Recency', 'Frequency', 'Total_Amount'],
+            n_clusters=3,
+            random_state=42
+        )
+        customer_features = kmeans_risk_transformer.fit_transform(customer_features)
+        
+        # Store the transformer for analysis
+        self.kmeans_transformer = kmeans_risk_transformer
+        
+        # Step 3: Scale numerical features (excluding target variables)
+        numerical_cols = customer_features.select_dtypes(include=[np.number]).columns.tolist()
+        cols_to_scale = [col for col in numerical_cols if col not in ['is_high_risk', 'Cluster']]
+        
+        if cols_to_scale:
+            scaler = StandardScaler()
+            customer_features[cols_to_scale] = scaler.fit_transform(customer_features[cols_to_scale])
+        
+        logger.info(f"Task 4 feature engineering completed: {customer_features.shape}")
+        return customer_features
+    
+    def get_cluster_analysis_task4(self) -> pd.DataFrame:
+        """Get detailed cluster analysis for Task 4"""
+        if hasattr(self, 'kmeans_transformer'):
+            return self.kmeans_transformer.get_cluster_analysis()
+        else:
+            logger.warning("K-Means transformer not fitted. Run fit_transform_customers_task4 first.")
+            return pd.DataFrame()
+
 
 # Legacy support - maintain backward compatibility
 class DataProcessor(ComprehensiveFeatureEngineering):
@@ -485,8 +699,54 @@ if __name__ == "__main__":
     print("  - ComprehensiveFeatureEngineering: Main feature engineering pipeline")
     print("  - AggregateFeatureTransformer: Customer-level RFM and statistical features")
     print("  - TemporalFeatureTransformer: Time-based feature extraction")
-    print("  - RiskProxyTransformer: Risk scoring and proxy target creation")
+    print("  - RiskProxyTransformer: Risk scoring and proxy target creation (Task 3)")
+    print("  - KMeansRiskProxyTransformer: K-Means clustering risk proxy (Task 4)")
     print("  - WoETransformer: Weight of Evidence encoding")
     print("  - DataProcessor: Legacy compatibility class")
+    
+    # Task 4 Demonstration
+    print("\n" + "="*60)
+    print("TASK 4 DEMONSTRATION: K-MEANS CLUSTERING RISK PROXY")
+    print("="*60)
+    
+    try:
+        # Initialize feature engineering pipeline
+        fe = ComprehensiveFeatureEngineering()
+        
+        # Load sample data if available
+        import os
+        if os.path.exists('data/raw/data.csv'):
+            print("Loading data for Task 4 demonstration...")
+            data = fe.load_data('data/raw/data.csv')
+            print(f"Data loaded: {data.shape}")
+            
+            # Apply Task 4 feature engineering
+            print("\nApplying Task 4 K-Means clustering approach...")
+            customer_features_task4 = fe.fit_transform_customers_task4(data)
+            
+            print(f"\n📊 Task 4 Results:")
+            print(f"Customer features shape: {customer_features_task4.shape}")
+            print(f"Target variable: 'is_high_risk' (0=Low risk, 1=High risk)")
+            
+            # Show cluster analysis
+            cluster_analysis = fe.get_cluster_analysis_task4()
+            print(f"\n🔍 Cluster Analysis:")
+            print(cluster_analysis)
+            
+            # Show risk distribution
+            risk_dist = customer_features_task4['is_high_risk'].value_counts()
+            total = len(customer_features_task4)
+            print(f"\n📈 Risk Distribution:")
+            print(f"Low Risk (0): {risk_dist.get(0, 0):,} ({risk_dist.get(0, 0)/total*100:.1f}%)")
+            print(f"High Risk (1): {risk_dist.get(1, 0):,} ({risk_dist.get(1, 0)/total*100:.1f}%)")
+            
+            print(f"\n✅ Task 4 completed successfully!")
+            print(f"📁 Features ready for model training with 'is_high_risk' target")
+            
+        else:
+            print("No data file found. Task 4 demonstration requires data/raw/data.csv")
+            
+    except Exception as e:
+        print(f"❌ Task 4 demonstration error: {e}")
     
     logger.info("Feature engineering module ready for use!") 
