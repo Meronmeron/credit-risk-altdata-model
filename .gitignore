@@ -155,4 +155,35 @@ Thumbs.db
 *.tmp
 *.temp
 temp/
-tmp/ 
+tmp/
+
+# MLflow - Exclude experiment runs but keep structure
+mlruns/
+mlartifacts/
+.mlflow/
+
+# Model artifacts - Large files that shouldn't be in git
+models/*.joblib
+models/*.pkl
+models/*.h5
+models/*.onnx
+
+# Generated plots and results - Keep sample outputs only
+plots/*.png
+plots/*.jpg
+plots/*.pdf
+!plots/sample_*
+!plots/README.md
+
+# Large data files
+data/raw/*.csv
+data/raw/*.xlsx
+data/processed/*.csv
+!data/raw/sample_data.csv
+!data/processed/README.md
+
+# Results - Keep summaries but not full experiment data
+results/experiment_*
+results/detailed_*
+!results/model_comparison.csv
+!results/README.md 
