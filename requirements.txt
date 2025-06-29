@@ -35,7 +35,11 @@ click>=8.1.0
 # psycopg2-binary>=2.9.0
 # redis>=4.6.0
 
+# WoE and Feature Engineering
+xverse>=0.0.5
+woe>=0.1.1
+
 # Optional: Enhanced ML features (uncomment if needed)
-# xgboost>=1.7.0
+# xgboost>=1.7.0  
 # lightgbm>=4.0.0
 # optuna>=3.3.0 
