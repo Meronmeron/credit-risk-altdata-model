@@ -9,6 +9,7 @@ This module provides REST API endpoints for:
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
+import numpy as np
 from typing import Dict
 import logging
 import os
@@ -189,8 +190,6 @@ async def predict(customer: CustomerData):
 
         # Convert customer data to DataFrame
         customer_dict = customer.dict(exclude_unset=True)
-        # Remove customer_id from features
-        customer_dict.pop("customer_id", None)
         customer_df = pd.DataFrame([customer_dict])
 
         # Make prediction
@@ -257,4 +256,6 @@ async def get_model_info():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    uvicorn.run(
+        "main_task6:app", host="0.0.0.0", port=8000, reload=True, log_level="info"
+    )
